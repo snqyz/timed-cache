@@ -4,6 +4,8 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from timed_cache import TimedCache
 
 
@@ -13,6 +15,15 @@ def test_set_arg_is_hashable_and_order_independent(
     mock, cache = counter_cache_factory()
     cache.get({1, 2, 3})
     cache.get({3, 2, 1})
+    assert mock.call_count == 1
+
+
+def test_mixed_type_set_arg_is_hashable_and_order_independent(
+    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+) -> None:
+    mock, cache = counter_cache_factory()
+    cache.get({1, "a"})
+    cache.get({"a", 1})
     assert mock.call_count == 1
 
 
@@ -121,3 +132,18 @@ def test_background_refresh_does_not_resurrect_invalidated_entry() -> None:
     assert cache.size == 0
     assert cache.get("k") == 3
     assert call_count == 3
+
+
+def test_background_refresh_submit_failure_resets_refreshing_flag() -> None:
+    mock: MagicMock = MagicMock(side_effect=lambda *args, **kwargs: mock.call_count)
+    cache: TimedCache[int] = TimedCache(fetch_fn=mock, ttl_seconds=1)
+    cache.get("k")
+    time.sleep(1.1)
+
+    with patch.object(cache._refresh_executor, "submit", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            cache.get("k")
+
+    key = cache._make_key(("k",), {})
+    with cache._lock:
+        assert cache._entries[key].is_refreshing is False

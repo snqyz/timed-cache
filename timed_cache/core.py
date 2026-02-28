@@ -3,7 +3,9 @@
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
@@ -56,10 +58,22 @@ class TimedCache(Generic[T]):
         self,
         fetch_fn: Callable[..., T],
         ttl_seconds: float = 300,
+        max_entries: int | None = None,
+        max_refresh_workers: int = 8,
     ) -> None:
+        if max_entries is not None and max_entries < 1:
+            raise ValueError("max_entries must be >= 1 when provided")
+        if max_refresh_workers < 1:
+            raise ValueError("max_refresh_workers must be >= 1")
+
         self._fetch_fn = fetch_fn
         self._ttl_seconds = ttl_seconds
-        self._entries: dict[CacheKey, _CacheEntry[T]] = {}
+        self._max_entries = max_entries
+        self._entries: OrderedDict[CacheKey, _CacheEntry[T]] = OrderedDict()
+        self._refresh_executor = ThreadPoolExecutor(
+            max_workers=max_refresh_workers,
+            thread_name_prefix="timed-cache-refresh",
+        )
         # Single lock guards _entries and all entry.is_refreshing flags.
         # It is never held across a fetch_fn call, so contention stays low.
         self._lock = threading.Lock()
@@ -84,9 +98,13 @@ class TimedCache(Generic[T]):
                 # Cold start — insert a placeholder and become the fetch owner.
                 entry = _CacheEntry(value=None, fetched_at=None)
                 self._entries[key] = entry
+                self._entries.move_to_end(key, last=True)
+                self._evict_one_if_needed_locked()
                 owner = True
             else:
                 owner = False
+                # Any read marks the key as most recently used.
+                self._entries.move_to_end(key, last=True)
                 if self._is_stale(entry) and not entry.is_refreshing:
                     # Stale — return the old value now, refresh in background.
                     entry.is_refreshing = True
@@ -188,14 +206,14 @@ class TimedCache(Generic[T]):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> None:
-        """Start a daemon thread to refresh one stale entry."""
+        """Submit one stale-entry refresh into the bounded executor."""
         # Caller must hold self._lock and have set entry.is_refreshing = True.
-        thread = threading.Thread(
-            target=self._background_refresh,
-            args=(entry, args, kwargs),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self._refresh_executor.submit(self._background_refresh, entry, args, kwargs)
+        except Exception:
+            # Never leave the entry stuck in refreshing state.
+            entry.is_refreshing = False
+            raise
 
     def _background_refresh(
         self,
@@ -218,3 +236,13 @@ class TimedCache(Generic[T]):
             )
             with self._lock:
                 entry.is_refreshing = False  # must clear even on failure
+
+    def _evict_one_if_needed_locked(self) -> None:
+        """Evict one entry if configured max size is exceeded.
+
+        Caller must hold self._lock.
+        """
+        if self._max_entries is None or len(self._entries) <= self._max_entries:
+            return
+
+        self._entries.popitem(last=False)
