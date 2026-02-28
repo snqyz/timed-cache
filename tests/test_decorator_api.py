@@ -57,3 +57,24 @@ def test_decorated_function_exposes_peek_helper() -> None:
     assert fetch(1) == 10
     assert fetch.peek(1) == 10
     assert mock.call_count == 1
+
+
+def test_decorated_function_exposes_refresh_helper() -> None:
+    mock = MagicMock(side_effect=[10, 20])
+
+    @timed_cache
+    def fetch(value: int) -> int:
+        return mock(value)
+
+    assert fetch(1) == 10
+    assert mock.call_count == 1
+
+    # Manual refresh should trigger background fetch
+    fetch.refresh(1)
+    # Wait for the background thread
+    import time
+
+    time.sleep(0.1)
+
+    assert fetch(1) == 20
+    assert mock.call_count == 2

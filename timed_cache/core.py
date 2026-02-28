@@ -113,6 +113,7 @@ class TimedCache(Generic[T]):
                     # Stale — return the old value now, refresh in background.
                     entry.is_refreshing = True
                     self._spawn_background_refresh(
+                        key,
                         entry,
                         args,
                         kwargs,
@@ -152,6 +153,28 @@ class TimedCache(Generic[T]):
         """Remove all cached entries."""
         with self._lock:
             self._entries.clear()
+
+    def refresh(self, *args: Any, **kwargs: Any) -> None:
+        """Manually trigger a background refresh for the given arguments.
+
+        If the entry is already being refreshed, this is a no-op.
+        If an initial cold fetch is in-flight, this is also a no-op.
+        If the entry does not exist, it will be fetched in the background.
+        """
+        key = self._make_key(args, kwargs)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                # Cold start in background
+                entry = _CacheEntry(value=None, fetched_at=None)
+                self._entries[key] = entry
+                self._entries.move_to_end(key, last=True)
+                self._evict_one_if_needed_locked()
+                entry.is_refreshing = True
+                self._spawn_background_refresh(key, entry, args, kwargs)
+            elif entry.ready.is_set() and not entry.is_refreshing:
+                entry.is_refreshing = True
+                self._spawn_background_refresh(key, entry, args, kwargs)
 
     @property
     def size(self) -> int:
@@ -227,6 +250,7 @@ class TimedCache(Generic[T]):
 
     def _spawn_background_refresh(
         self,
+        key: CacheKey,
         entry: _CacheEntry[T],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -236,6 +260,7 @@ class TimedCache(Generic[T]):
         try:
             self._refresh_executor.submit(
                 self._background_refresh,
+                key,
                 entry,
                 args,
                 kwargs,
@@ -247,6 +272,7 @@ class TimedCache(Generic[T]):
 
     def _background_refresh(
         self,
+        key: CacheKey,
         entry: _CacheEntry[T],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -258,7 +284,8 @@ class TimedCache(Generic[T]):
                 entry.is_refreshing = False
                 entry.value = new_value
                 entry.fetched_at = time.monotonic()
-        except Exception:
+                entry.error = None
+        except Exception as error:
             fn_name = getattr(self._fetch_fn, "__qualname__", repr(self._fetch_fn))
             logger.exception(
                 "Background refresh failed for %s; keeping stale value",
@@ -266,6 +293,14 @@ class TimedCache(Generic[T]):
             )
             with self._lock:
                 entry.is_refreshing = False  # must clear even on failure
+                # Cold-key background refresh failed: remove placeholder so
+                # next get() retries instead of returning None.
+                if not entry.ready.is_set():
+                    entry.error = error
+                    if self._entries.get(key) is entry:
+                        self._entries.pop(key, None)
+        finally:
+            entry.ready.set()
 
     def _evict_one_if_needed_locked(self) -> None:
         """Evict one entry if configured max size is exceeded.
@@ -305,6 +340,7 @@ def timed_cache(
     The returned wrapped function also exposes:
     - ``cache``: underlying TimedCache instance
     - ``peek(*args, **kwargs)``
+    - ``refresh(*args, **kwargs)``
     - ``invalidate(*args, **kwargs)``
     - ``invalidate_all()``
     """
@@ -323,6 +359,7 @@ def timed_cache(
 
         wrapper.cache = cache
         wrapper.peek = cache.peek
+        wrapper.refresh = cache.refresh
         wrapper.invalidate = cache.invalidate
         wrapper.invalidate_all = cache.invalidate_all
         return cast("Callable[P, R]", wrapper)
