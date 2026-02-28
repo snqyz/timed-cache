@@ -13,7 +13,19 @@ dependencies = []
 [dependency-groups]
 dev = [
   "pytest>=9.0.0",
+  "pytest-cov>=6.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["timed_cache"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=timed_cache --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["timed_cache"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

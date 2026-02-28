@@ -12,3 +12,4 @@ wheels/
 # Conf files
 .python-version
 settings.json
+.coverage
