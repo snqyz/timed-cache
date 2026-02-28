@@ -99,8 +99,7 @@ def test_failed_cold_fetch_removes_entry() -> None:
 
 def test_concurrent_cold_fetch_error_unblocks_waiting_threads() -> None:
     barrier = threading.Barrier(3)
-    owner_errors: list[Exception] = []
-    waiter_nones: list[None] = []
+    errors: list[Exception] = []
 
     def failing_fetch() -> int:
         time.sleep(0.05)
@@ -111,10 +110,9 @@ def test_concurrent_cold_fetch_error_unblocks_waiting_threads() -> None:
     def worker() -> None:
         barrier.wait()
         try:
-            result = cache.get()
-            waiter_nones.append(result)  # type: ignore[arg-type]
+            cache.get()
         except Exception as error:
-            owner_errors.append(error)
+            errors.append(error)
 
     threads = [threading.Thread(target=worker) for _ in range(3)]
     for thread in threads:
@@ -123,10 +121,9 @@ def test_concurrent_cold_fetch_error_unblocks_waiting_threads() -> None:
         thread.join(timeout=2)
 
     assert not any(thread.is_alive() for thread in threads)
-    assert len(owner_errors) == 1
-    assert isinstance(owner_errors[0], RuntimeError)
-    assert len(waiter_nones) == 2
-    assert all(value is None for value in waiter_nones)
+    assert len(errors) == 3
+    assert all(isinstance(error, RuntimeError) for error in errors)
+    assert all(str(error) == "boom" for error in errors)
 
 
 def test_background_refresh_error_preserves_stale_value() -> None:

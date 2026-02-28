@@ -32,6 +32,7 @@ class _CacheEntry(Generic[T]):
 
     value: T | None
     fetched_at: float | None
+    error: Exception | None = None
     ready: threading.Event = field(default_factory=threading.Event)
     is_refreshing: bool = False
 
@@ -120,6 +121,8 @@ class TimedCache(Generic[T]):
         # For concurrent cold-start threads it blocks until the owner is done.
         entry.ready.wait()
         with self._lock:
+            if entry.error is not None:
+                raise entry.error
             return entry.value
 
     def invalidate(self, *args: Any, **kwargs: Any) -> None:
@@ -191,13 +194,15 @@ class TimedCache(Generic[T]):
         """
         try:
             value: T = self._fetch_fn(*args, **kwargs)
-        except Exception:
+        except Exception as error:
             with self._lock:
+                entry.error = error
                 self._entries.pop(key, None)
             entry.ready.set()  # unblock any waiting threads so they can retry
             raise
 
         with self._lock:
+            entry.error = None
             entry.value = value
             entry.fetched_at = time.monotonic()
         entry.ready.set()
