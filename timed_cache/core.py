@@ -7,11 +7,14 @@ from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from functools import wraps
+from typing import Any, Generic, ParamSpec, TypeVar, overload, cast
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # A cache key is built from the positional and keyword arguments passed to get().
 CacheKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
@@ -246,3 +249,55 @@ class TimedCache(Generic[T]):
             return
 
         self._entries.popitem(last=False)
+
+
+@overload
+def timed_cache(func: Callable[P, R], /) -> Callable[P, R]: ...
+
+
+@overload
+def timed_cache(
+    *,
+    ttl_seconds: float = 300,
+    max_entries: int | None = None,
+    max_refresh_workers: int = 8,
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
+def timed_cache(
+    func: Callable[P, R] | None = None,
+    /,
+    *,
+    ttl_seconds: float = 300,
+    max_entries: int | None = None,
+    max_refresh_workers: int = 8,
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+    """Decorate a function with TimedCache semantics.
+
+    Can be used as ``@timed_cache`` or ``@timed_cache(ttl_seconds=...)``.
+    The returned wrapped function also exposes:
+    - ``cache``: underlying TimedCache instance
+    - ``invalidate(*args, **kwargs)``
+    - ``invalidate_all()``
+    """
+
+    def decorate(inner: Callable[P, R]) -> Callable[P, R]:
+        cache = TimedCache(
+            fetch_fn=inner,
+            ttl_seconds=ttl_seconds,
+            max_entries=max_entries,
+            max_refresh_workers=max_refresh_workers,
+        )
+
+        @wraps(inner)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            return cache.get(*args, **kwargs)
+
+        setattr(wrapper, "cache", cache)
+        setattr(wrapper, "invalidate", cache.invalidate)
+        setattr(wrapper, "invalidate_all", cache.invalidate_all)
+        return cast(Callable[P, R], wrapper)
+
+    if func is not None:
+        return decorate(func)
+    return decorate
