@@ -44,3 +44,16 @@ def test_decorated_function_exposes_invalidation_helpers() -> None:
 
     assert mock.call_count == 2
     assert fetch.cache.size == 1
+
+
+def test_decorated_function_exposes_peek_helper() -> None:
+    mock = MagicMock(side_effect=[10, 20])
+
+    @timed_cache
+    def fetch(value: int) -> int:
+        return mock(value)
+
+    assert fetch.peek(1) is None
+    assert fetch(1) == 10
+    assert fetch.peek(1) == 10
+    assert mock.call_count == 1

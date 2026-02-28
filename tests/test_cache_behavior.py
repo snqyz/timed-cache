@@ -35,6 +35,32 @@ def test_returns_typed_value() -> None:
     assert cache.get("world") == "hello world"
 
 
+def test_peek_miss_returns_none_without_fetch(
+    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+) -> None:
+    mock, cache = counter_cache_factory()
+    assert cache.peek("a") is None
+    assert mock.call_count == 0
+
+
+def test_peek_hit_returns_cached_value_without_refetch(
+    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+) -> None:
+    mock, cache = counter_cache_factory()
+    assert cache.get("a") == 1
+    assert cache.peek("a") == 1
+    assert mock.call_count == 1
+
+
+def test_peek_stale_entry_returns_stale_value_without_refresh() -> None:
+    mock = MagicMock(side_effect=[1, 2])
+    cache: TimedCache[int] = TimedCache(fetch_fn=mock, ttl_seconds=0)
+
+    assert cache.get("a") == 1
+    assert cache.peek("a") == 1
+    assert mock.call_count == 1
+
+
 def test_same_positional_args_hit(
     counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
 ) -> None:

@@ -10,7 +10,10 @@ from timed_cache import TimedCache
 
 
 def test_concurrent_cold_requests_never_return_none(
-    slow_cache_factory: Callable[[float, float, int], tuple[MagicMock, TimedCache[int]]],
+    slow_cache_factory: Callable[
+        [float, float, int],
+        tuple[MagicMock, TimedCache[int]],
+    ],
 ) -> None:
     _, cache = slow_cache_factory(delay=0.15)
     results: list[int | None] = []
@@ -31,7 +34,10 @@ def test_concurrent_cold_requests_never_return_none(
 
 
 def test_concurrent_cold_requests_only_fetch_once(
-    slow_cache_factory: Callable[[float, float, int], tuple[MagicMock, TimedCache[int]]],
+    slow_cache_factory: Callable[
+        [float, float, int],
+        tuple[MagicMock, TimedCache[int]],
+    ],
 ) -> None:
     mock, cache = slow_cache_factory(delay=0.1)
     barrier = threading.Barrier(8)
@@ -50,7 +56,10 @@ def test_concurrent_cold_requests_only_fetch_once(
 
 
 def test_concurrent_different_keys_fetch_independently(
-    slow_cache_factory: Callable[[float, float, int], tuple[MagicMock, TimedCache[int]]],
+    slow_cache_factory: Callable[
+        [float, float, int],
+        tuple[MagicMock, TimedCache[int]],
+    ],
 ) -> None:
     mock, cache = slow_cache_factory(delay=0.05)
     barrier = threading.Barrier(4)
@@ -256,7 +265,10 @@ def test_invalidate_under_concurrent_access(
 
 
 def test_ready_event_set_after_cold_fetch(
-    slow_cache_factory: Callable[[float, float, int], tuple[MagicMock, TimedCache[int]]],
+    slow_cache_factory: Callable[
+        [float, float, int],
+        tuple[MagicMock, TimedCache[int]],
+    ],
 ) -> None:
     _, cache = slow_cache_factory(delay=0.05)
     thread = threading.Thread(target=cache.get, args=("k",))
@@ -309,6 +321,26 @@ def test_size_counts_placeholder_during_cold_fetch() -> None:
     assert entered.wait(timeout=1.0)
 
     assert cache.size == 1
+    release.set()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+
+
+def test_peek_during_inflight_cold_fetch_returns_none() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_fetch(*args: Any, **kwargs: Any) -> int:
+        entered.set()
+        release.wait(timeout=1.0)
+        return 10
+
+    cache: TimedCache[int] = TimedCache(fetch_fn=slow_fetch)
+    thread = threading.Thread(target=cache.get, args=("k",))
+    thread.start()
+    assert entered.wait(timeout=1.0)
+
+    assert cache.peek("k") is None
     release.set()
     thread.join(timeout=1.0)
     assert not thread.is_alive()

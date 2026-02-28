@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Generic, ParamSpec, TypeVar, overload, cast
+from typing import Any, Generic, ParamSpec, TypeVar, cast, overload
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,11 @@ class TimedCache(Generic[T]):
                 if self._is_stale(entry) and not entry.is_refreshing:
                     # Stale — return the old value now, refresh in background.
                     entry.is_refreshing = True
-                    self._spawn_background_refresh(entry, args, kwargs)
+                    self._spawn_background_refresh(
+                        entry,
+                        args,
+                        kwargs,
+                    )
 
         if owner:
             return self._do_cold_fetch(key, entry, args, kwargs)
@@ -123,6 +127,19 @@ class TimedCache(Generic[T]):
         with self._lock:
             if entry.error is not None:
                 raise entry.error
+            return entry.value
+
+    def peek(self, *args: Any, **kwargs: Any) -> T | None:
+        """Return a cached value if present, without triggering a fetch.
+
+        Returns ``None`` when the key is absent or still in an in-flight cold
+        fetch placeholder state.
+        """
+        key = self._make_key(args, kwargs)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or not entry.ready.is_set():
+                return None
             return entry.value
 
     def invalidate(self, *args: Any, **kwargs: Any) -> None:
@@ -217,7 +234,12 @@ class TimedCache(Generic[T]):
         """Submit one stale-entry refresh into the bounded executor."""
         # Caller must hold self._lock and have set entry.is_refreshing = True.
         try:
-            self._refresh_executor.submit(self._background_refresh, entry, args, kwargs)
+            self._refresh_executor.submit(
+                self._background_refresh,
+                entry,
+                args,
+                kwargs,
+            )
         except Exception:
             # Never leave the entry stuck in refreshing state.
             entry.is_refreshing = False
@@ -282,6 +304,7 @@ def timed_cache(
     Can be used as ``@timed_cache`` or ``@timed_cache(ttl_seconds=...)``.
     The returned wrapped function also exposes:
     - ``cache``: underlying TimedCache instance
+    - ``peek(*args, **kwargs)``
     - ``invalidate(*args, **kwargs)``
     - ``invalidate_all()``
     """
@@ -298,10 +321,11 @@ def timed_cache(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             return cache.get(*args, **kwargs)
 
-        setattr(wrapper, "cache", cache)
-        setattr(wrapper, "invalidate", cache.invalidate)
-        setattr(wrapper, "invalidate_all", cache.invalidate_all)
-        return cast(Callable[P, R], wrapper)
+        wrapper.cache = cache
+        wrapper.peek = cache.peek
+        wrapper.invalidate = cache.invalidate
+        wrapper.invalidate_all = cache.invalidate_all
+        return cast("Callable[P, R]", wrapper)
 
     if func is not None:
         return decorate(func)
