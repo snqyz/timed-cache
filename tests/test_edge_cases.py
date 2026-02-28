@@ -56,7 +56,7 @@ def test_background_refresh_failure_is_logged() -> None:
     cache: TimedCache[int] = TimedCache(fetch_fn=flaky_fetch, ttl_seconds=1)
     cache.get()
 
-    with patch("timed_cache.logger.exception") as logger_exception:
+    with patch("timed_cache.core.logger.exception") as logger_exception:
         time.sleep(1.1)
         stale = cache.get()
         assert stale == 10
