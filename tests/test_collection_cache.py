@@ -17,16 +17,12 @@ def test_collection_batch_fetches_on_cold_start():
     mock.assert_called_once_with(["apple", "banana"])
 
 
-def test_collection_behaves_like_dict():
+def test_collection_supports_getitem():
     cache = TimedCollection(fetch_fn=lambda keys: {k: len(k) for k in keys})
     cache.get_collection(["a", "bc"])
 
-    assert len(cache) == 2
-    assert list(cache) == ["a", "bc"]
     assert cache["a"] == 1
     assert cache["bc"] == 2
-    assert "a" in cache
-    assert "xyz" not in cache
 
 
 def test_collection_individual_ttl():

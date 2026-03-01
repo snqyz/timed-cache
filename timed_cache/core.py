@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import wraps
@@ -315,7 +315,7 @@ class TimedCache(Generic[T]):
         self._entries.popitem(last=False)
 
 
-class TimedCollection(TimedCache[V], Generic[K, V], Mapping[K, V]):
+class TimedCollection(TimedCache[V], Generic[K, V]):
     """A TimedCache variant that behaves like a dictionary for a set of keys.
 
     Each key is fetched and cached independently, allowing individual TTLs.
@@ -338,10 +338,13 @@ class TimedCollection(TimedCache[V], Generic[K, V], Mapping[K, V]):
             max_entries=max_entries,
             max_refresh_workers=max_refresh_workers,
         )
-        self._current_keys: tuple[K, ...] = ()
 
-    def _fetch_single(self, key: K, **kwargs: Any) -> V:
+    def _fetch_single(self, *args: Any, **kwargs: Any) -> V:
         """Adapter to call the batch fetch function for a single key."""
+        # TimedCache always calls fetch_fn with the same *args passed to get().
+        # TimedCollection expects single-key entries, but we must handle *args
+        # to avoid TypeErrors from the underlying TimedCache.get() call.
+        key = args[0] if len(args) == 1 else args
         results = self._batch_fetch_fn([key], **kwargs)
         if key not in results:
             raise KeyError(f"Key {key!r} missing from fetch_fn results")
@@ -357,7 +360,6 @@ class TimedCollection(TimedCache[V], Generic[K, V], Mapping[K, V]):
         - Fresh keys are returned immediately.
         """
         keys_list = list(keys)
-        self._current_keys = tuple(keys_list)
 
         cold_keys: list[K] = []
         cold_keys_set: set[K] = set()
@@ -503,18 +505,9 @@ class TimedCollection(TimedCache[V], Generic[K, V], Mapping[K, V]):
                             self._entries.pop(ckey, None)
                         entry.ready.set()
 
-    # Mapping interface for "dictionary-like" behavior
+    # Dictionary-like access
     def __getitem__(self, key: K) -> V:
         return self.get(key)
-
-    def __iter__(self) -> Iterator[K]:
-        return iter(self._current_keys)
-
-    def __len__(self) -> int:
-        return len(self._current_keys)
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._current_keys
 
 
 @overload
