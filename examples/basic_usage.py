@@ -19,7 +19,8 @@ def fetch_scores(subject: str, *, passing_only: bool = False) -> list[int]:
 
 def main() -> None:
     # Two requests for the same key ("math") should trigger only one cold fetch.
-    cache: TimedCache[list[int]] = TimedCache(fetch_fn=fetch_scores, ttl_seconds=10)
+    # Use a short TTL so we can quickly demonstrate stale-while-revalidate.
+    cache: TimedCache[list[int]] = TimedCache(fetch_fn=fetch_scores, ttl_seconds=2)
     results: dict[str, list[int] | None] = {}
 
     def request(thread_name: str) -> None:
@@ -38,6 +39,21 @@ def main() -> None:
 
     # Both threads should report the same cached payload.
     print("results:", results)
+
+    print("\nwaiting for TTL to elapse...")
+    time.sleep(2.1)
+
+    # First read after TTL returns stale data immediately and triggers
+    # background refresh in the executor.
+    stale_value = cache.get("math")
+    print(f"[after-ttl-1] stale value returned immediately: {stale_value}")
+
+    # Give background refresh enough time to complete.
+    time.sleep(1.2)
+
+    # Next read returns the newly refreshed value.
+    refreshed_value = cache.get("math")
+    print(f"[after-ttl-2] refreshed value from background fetch: {refreshed_value}")
 
 
 if __name__ == "__main__":
