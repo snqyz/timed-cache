@@ -275,7 +275,7 @@ def test_ready_event_set_after_cold_fetch(
     thread.start()
     thread.join()
 
-    key = cache._make_key(("k",), {})
+    key = cache._key_fn("k",)
     entry = cache._entries[key]
     assert entry.ready.is_set()
 

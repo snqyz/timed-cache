@@ -1,5 +1,5 @@
-import time
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -98,7 +98,7 @@ def test_get_collection_already_refreshing():
     time.sleep(0.2)
 
     # Manually set is_refreshing to True for 'a'
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     with cache._lock:
         cache._entries[ckey].is_refreshing = True
 
@@ -130,7 +130,7 @@ def test_get_collection_entry_exists_after_fetch():
 
     time.sleep(0.1)
     # Manually insert entry for 'a'
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     with cache._lock:
         entry = _CacheEntry(value=2, fetched_at=time.monotonic())
         entry.ready.set()
@@ -196,7 +196,7 @@ def test_batch_refresh_failure_cold_entry(caplog):
     mock = MagicMock(side_effect=Exception("Fetch failed"))
     cache = TimedCollection(fetch_fn=mock)
 
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     entry = _CacheEntry(value=None, fetched_at=None)
     # entry.ready is NOT set
     with cache._lock:
@@ -221,7 +221,7 @@ def test_batch_refresh_failure_entry_missing(caplog):
 
     # Pre-populate
     with cache._lock:
-        ckey = cache._make_key(("a",), {})
+        ckey = cache._key_fn("a")
         entry = _CacheEntry(value=1, fetched_at=time.monotonic())
         entry.ready.set()
         cache._entries[ckey] = entry
@@ -249,7 +249,7 @@ def test_get_collection_waits_for_inflight_cold_fetch():
         with lock:
             call_count += 1
         time.sleep(0.2)
-        return {k: 1 for k in keys}
+        return dict.fromkeys(keys, 1)
 
     cache = TimedCollection(fetch_fn=slow_fetch)
     first_result: dict[str, int] = {}
@@ -281,7 +281,9 @@ def test_get_collection_missing_cold_key_raises_and_allows_retry():
 
 
 def test_get_collection_rolls_back_refresh_flag_when_submit_fails():
-    cache = TimedCollection(fetch_fn=lambda keys: {k: 1 for k in keys}, ttl_seconds=0.1)
+    cache = TimedCollection(
+        fetch_fn=lambda keys: dict.fromkeys(keys, 1), ttl_seconds=0.1
+    )
     cache.get_collection(["a"])
     time.sleep(0.2)
 
@@ -294,7 +296,7 @@ def test_get_collection_rolls_back_refresh_flag_when_submit_fails():
     with pytest.raises(RuntimeError, match="submit failed"):
         cache.get_collection(["a"])
 
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     with cache._lock:
         assert cache._entries[ckey].is_refreshing is False
 
@@ -315,7 +317,7 @@ def test_batch_refresh_missing_key_clears_refreshing_flag():
         time.sleep(0.05)
     assert mock.call_count == 2
 
-    ckey_b = cache._make_key(("b",), {})
+    ckey_b = cache._key_fn("b")
     with cache._lock:
         assert cache._entries[ckey_b].is_refreshing is False
 
@@ -344,7 +346,9 @@ def test_get_collection_duplicate_key_after_eviction_skips_duplicate_fetch():
 
 
 def test_get_collection_cold_fetch_exception_cleans_placeholders():
-    cache = TimedCollection(fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom")))
+    cache = TimedCollection(
+        fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
 
     with pytest.raises(RuntimeError, match="boom"):
         cache.get_collection(["a", "b"])
@@ -416,7 +420,7 @@ def test_get_collection_missing_key_keeps_ready_entry_inserted_during_fetch():
     t.start()
     gate.wait(timeout=1.0)
 
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     with cache._lock:
         entry = cache._entries[ckey]
         entry.value = 123
@@ -463,7 +467,9 @@ def test_get_collection_waiting_entry_raises_error():
 
 
 def test_get_collection_submit_failure_with_missing_entry_branch():
-    cache = TimedCollection(fetch_fn=lambda keys: {k: 1 for k in keys}, ttl_seconds=0.1)
+    cache = TimedCollection(
+        fetch_fn=lambda keys: dict.fromkeys(keys, 1), ttl_seconds=0.1
+    )
     cache.get_collection(["a"])
     time.sleep(0.2)
 
@@ -480,7 +486,7 @@ def test_get_collection_submit_failure_with_missing_entry_branch():
 
 def test_batch_refresh_missing_key_for_not_ready_entry_removes_it():
     cache = TimedCollection(fetch_fn=lambda keys: {})
-    ckey = cache._make_key(("a",), {})
+    ckey = cache._key_fn("a")
     with cache._lock:
         entry = _CacheEntry(value=None, fetched_at=None)
         cache._entries[ckey] = entry

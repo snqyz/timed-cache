@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
+import pytest
+
 from timed_cache import TimedCache
 
 
@@ -98,27 +100,27 @@ def test_kwarg_order_is_irrelevant(
 
 
 def test_dict_arg_is_hashable(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get({"key": "value"})
     cache.get({"key": "value"})
     assert mock.call_count == 1
 
 
 def test_list_arg_is_hashable(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get([1, 2, 3])
     cache.get([1, 2, 3])
     assert mock.call_count == 1
 
 
 def test_nested_dict_differentiates_keys(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get({"a": {"b": 1}})
     cache.get({"a": {"b": 2}})
     assert mock.call_count == 2
@@ -135,9 +137,9 @@ def test_no_args_is_valid_key(
 
 
 def test_nested_kwargs_are_hashable_and_order_independent(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get(config={"roles": ["admin", "user"], "flags": {"active": True}})
     cache.get(config={"flags": {"active": True}, "roles": ["admin", "user"]})
     assert mock.call_count == 1
@@ -246,3 +248,98 @@ def test_invalidate_all_resets_size(
     cache.get("b")
     cache.invalidate_all()
     assert cache.size == 0
+
+
+from timed_cache import TimedCache, timed_cache
+
+
+def test_custom_key_fn():
+    # Simple key fn that only cares about the first argument
+    def my_key_fn(*args, **kwargs):
+        return args[0]
+
+    calls = 0
+
+    def fetch(x, y):
+        nonlocal calls
+        calls += 1
+        return x + y
+
+    cache = TimedCache(fetch_fn=fetch, key_fn=my_key_fn)
+
+    assert cache.get(1, 10) == 11
+    assert calls == 1
+
+    # Should hit cache because the first argument is the same
+    assert cache.get(1, 20) == 11
+    assert calls == 1
+
+    # Different first argument, should fetch
+    assert cache.get(2, 10) == 12
+    assert calls == 2
+
+
+def test_decorator_custom_key_fn():
+    def my_key_fn(*args, **kwargs):
+        return args[0]
+
+    calls = 0
+
+    @timed_cache(key_fn=my_key_fn)
+    def my_func(x, y):
+        nonlocal calls
+        calls += 1
+        return x + y
+
+    assert my_func(1, 10) == 11
+    assert calls == 1
+    assert my_func(1, 20) == 11
+    assert calls == 1
+    assert my_func(2, 10) == 12
+    assert calls == 2
+
+
+def test_make_key_hits():
+    calls = 0
+
+    def fetch(x, y=None):
+        nonlocal calls
+        calls += 1
+        return x
+
+    # Use the fast key function
+    cache = TimedCache(fetch_fn=fetch, key_fn=TimedCache.make_key)
+
+    assert cache.get(1, y=2) == 1
+    assert calls == 1
+
+    # Same args, should hit cache
+    assert cache.get(1, y=2) == 1
+    assert calls == 1
+
+    # Different args
+    assert cache.get(2) == 2
+    assert calls == 2
+
+
+def test_make_key_fails_on_mutable():
+    cache = TimedCache(fetch_fn=lambda x: x, key_fn=TimedCache.make_key)
+
+    # make_key does not convert lists to tuples
+    with pytest.raises(TypeError, match="unhashable type: 'list'"):
+        cache.get([1, 2, 3])
+
+
+def test_decorator_make_key():
+    calls = 0
+
+    @timed_cache(key_fn=TimedCache.make_key)
+    def my_func(x):
+        nonlocal calls
+        calls += 1
+        return x
+
+    assert my_func(10) == 10
+    assert calls == 1
+    assert my_func(10) == 10
+    assert calls == 1

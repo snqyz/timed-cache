@@ -47,6 +47,12 @@ class TimedCache(Generic[T]):
     *next* caller receives the stale value immediately and a background thread
     silently refreshes it; no caller ever blocks on a refresh.
 
+    Key Generation:
+    By default, this uses the fast ``make_key`` which assumes all arguments are
+    hashable (e.g., int, str, tuple). If you need to pass mutable arguments
+    (e.g., list, dict, set), provide ``key_fn=TimedCache.deep_key_fn`` to the
+    constructor.
+
     Errors during a cold-start fetch propagate to the caller.  Errors during a
     background refresh are logged and the stale value is kept so that the next
     call can try again.
@@ -66,6 +72,7 @@ class TimedCache(Generic[T]):
         ttl_seconds: float = 300,
         max_entries: int | None = None,
         max_refresh_workers: int = 8,
+        key_fn: Callable[..., Any] | None = None,
     ) -> None:
         if max_entries is not None and max_entries < 1:
             raise ValueError("max_entries must be >= 1 when provided")
@@ -75,7 +82,8 @@ class TimedCache(Generic[T]):
         self._fetch_fn = fetch_fn
         self._ttl_seconds = ttl_seconds
         self._max_entries = max_entries
-        self._entries: OrderedDict[CacheKey, _CacheEntry[T]] = OrderedDict()
+        self._key_fn = key_fn or self.make_key
+        self._entries: OrderedDict[Any, _CacheEntry[T]] = OrderedDict()
         self._refresh_executor = ThreadPoolExecutor(
             max_workers=max_refresh_workers,
             thread_name_prefix="timed-cache-refresh",
@@ -95,7 +103,7 @@ class TimedCache(Generic[T]):
         immediately if a background refresh is already running or has just
         been kicked off.
         """
-        key = self._make_key(args, kwargs)
+        key = self._key_fn(*args, **kwargs)
 
         with self._lock:
             entry = self._entries.get(key)
@@ -138,7 +146,7 @@ class TimedCache(Generic[T]):
         Returns ``None`` when the key is absent or still in an in-flight cold
         fetch placeholder state.
         """
-        key = self._make_key(args, kwargs)
+        key = self._key_fn(*args, **kwargs)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None or not entry.ready.is_set():
@@ -147,7 +155,7 @@ class TimedCache(Generic[T]):
 
     def invalidate(self, *args: Any, **kwargs: Any) -> None:
         """Remove the cache entry for the given arguments, if present."""
-        key = self._make_key(args, kwargs)
+        key = self._key_fn(*args, **kwargs)
         with self._lock:
             self._entries.pop(key, None)
 
@@ -163,7 +171,7 @@ class TimedCache(Generic[T]):
         If an initial cold fetch is in-flight, this is also a no-op.
         If the entry does not exist, it will be fetched in the background.
         """
-        key = self._make_key(args, kwargs)
+        key = self._key_fn(*args, **kwargs)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -189,8 +197,25 @@ class TimedCache(Generic[T]):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> CacheKey:
-        """Normalize call arguments into a deterministic, hashable cache key."""
+    def make_key(*args: Any, **kwargs: Any) -> Any:
+        """A fast, non-recursive key generator (default).
+
+        This assumes all arguments are already hashable and does not perform
+        recursive normalization. Use this when performance is critical and
+        arguments are simple (e.g., strings, ints, or already hashable tuples).
+        """
+        if not kwargs:
+            return args
+        return (args, tuple(sorted(kwargs.items())))
+
+    @staticmethod
+    def deep_key_fn(*args: Any, **kwargs: Any) -> Any:
+        """A robust key generator that handles mutable arguments.
+
+        Recursively converts lists, dicts, and sets into hashable equivalents
+        (tuples) so they can be used as cache keys. Use this if your cached
+        function accepts mutable arguments.
+        """
 
         def make_hashable(obj: Any) -> Any:
             """Recursively convert mutable containers to hashable equivalents."""
@@ -224,7 +249,7 @@ class TimedCache(Generic[T]):
 
     def _do_cold_fetch(
         self,
-        key: CacheKey,
+        key: Any,
         entry: _CacheEntry[T],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -252,7 +277,7 @@ class TimedCache(Generic[T]):
 
     def _spawn_background_refresh(
         self,
-        key: CacheKey,
+        key: Any,
         entry: _CacheEntry[T],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -274,7 +299,7 @@ class TimedCache(Generic[T]):
 
     def _background_refresh(
         self,
-        key: CacheKey,
+        key: Any,
         entry: _CacheEntry[T],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -321,6 +346,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
     Each key is fetched and cached independently, allowing individual TTLs.
     The fetch function must accept an iterable of keys and optional kwargs:
     ``fetch_fn(keys, **kwargs)``.
+
+    Key Generation:
+    By default, this uses the fast ``make_key`` which expects keys to be
+    hashable. Pass ``key_fn=TimedCache.deep_key_fn`` if keys are mutable.
     """
 
     def __init__(
@@ -329,6 +358,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
         ttl_seconds: float = 300,
         max_entries: int | None = None,
         max_refresh_workers: int = 8,
+        key_fn: Callable[..., Any] | None = None,
     ) -> None:
         self._batch_fetch_fn = fetch_fn
         # Adapter for TimedCache's single-key get/refresh operations.
@@ -337,7 +367,16 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             ttl_seconds=ttl_seconds,
             max_entries=max_entries,
             max_refresh_workers=max_refresh_workers,
+            key_fn=key_fn or self._make_collection_key,
         )
+
+    @staticmethod
+    def _make_collection_key(key: Any, **kwargs: Any) -> Any:
+        """Default key generator for TimedCollection.
+
+        Wraps the key in a tuple to match TimedCache's expectation of *args.
+        """
+        return TimedCache.make_key(key, **kwargs)
 
     def _fetch_single(self, *args: Any, **kwargs: Any) -> V:
         """Adapter to call the batch fetch function for a single key."""
@@ -369,7 +408,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
 
         with self._lock:
             for k in keys_list:
-                ckey = self._make_key((k,), kwargs)
+                ckey = self._key_fn(k, **kwargs)
                 entry = self._entries.get(ckey)
                 if entry is None:
                     # Claim ownership for this cold key so concurrent callers
@@ -402,7 +441,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             except Exception as error:
                 with self._lock:
                     for k in cold_keys:
-                        ckey = self._make_key((k,), kwargs)
+                        ckey = self._key_fn(k, **kwargs)
                         entry = self._entries.get(ckey)
                         if entry is not None and not entry.ready.is_set():
                             entry.error = error
@@ -419,7 +458,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
 
             with self._lock:
                 for k in cold_keys:
-                    ckey = self._make_key((k,), kwargs)
+                    ckey = self._key_fn(k, **kwargs)
                     entry = self._entries.get(ckey)
                     if k in new_data:
                         v = new_data[k]
@@ -457,7 +496,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             except Exception:
                 with self._lock:
                     for k in stale_keys:
-                        ckey = self._make_key((k,), kwargs)
+                        ckey = self._key_fn(k, **kwargs)
                         entry = self._entries.get(ckey)
                         if entry is not None:
                             entry.is_refreshing = False
@@ -473,17 +512,17 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
         results: dict[K, V] = {}
         with self._lock:
             for k in keys:
-                ckey = self._make_key((k,), kwargs)
+                ckey = self._key_fn(k, **kwargs)
                 entry = self._entries.get(ckey)
                 if entry is not None and entry.ready.is_set():
-                    results[k] = cast(V, entry.value)
+                    results[k] = cast("V", entry.value)
         return results
 
     def invalidate_collection(self, keys: Iterable[K], **kwargs: Any) -> None:
         """Remove cache entries for the given keys and arguments, if present."""
         with self._lock:
             for k in keys:
-                ckey = self._make_key((k,), kwargs)
+                ckey = self._key_fn(k, **kwargs)
                 self._entries.pop(ckey, None)
 
     def _batch_refresh(self, keys: list[K], kwargs: dict[str, Any]) -> None:
@@ -492,7 +531,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             new_data = self._batch_fetch_fn(keys, **kwargs)
             with self._lock:
                 for k in keys:
-                    ckey = self._make_key((k,), kwargs)
+                    ckey = self._key_fn(k, **kwargs)
                     entry = self._entries.get(ckey)
                     if entry is None:
                         continue
@@ -517,7 +556,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             logger.exception("Background batch refresh failed")
             with self._lock:
                 for k in keys:
-                    ckey = self._make_key((k,), kwargs)
+                    ckey = self._key_fn(k, **kwargs)
                     entry = self._entries.get(ckey)
                     if entry:
                         entry.is_refreshing = False
@@ -541,6 +580,7 @@ def timed_cache(
     ttl_seconds: float = 300,
     max_entries: int | None = None,
     max_refresh_workers: int = 8,
+    key_fn: Callable[..., Any] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
@@ -551,8 +591,14 @@ def timed_cache(
     ttl_seconds: float = 300,
     max_entries: int | None = None,
     max_refresh_workers: int = 8,
+    key_fn: Callable[..., Any] | None = None,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorate a function with TimedCache semantics.
+
+    By default, this uses the fast ``make_key`` which assumes all arguments are
+    hashable (e.g., int, str, tuple). If the decorated function must accept
+    mutable arguments (e.g., list, dict, set), provide
+    ``key_fn=TimedCache.deep_key_fn``.
 
     Can be used as ``@timed_cache`` or ``@timed_cache(ttl_seconds=...)``.
     The returned wrapped function also exposes:
@@ -569,6 +615,7 @@ def timed_cache(
             ttl_seconds=ttl_seconds,
             max_entries=max_entries,
             max_refresh_workers=max_refresh_workers,
+            key_fn=key_fn,
         )
 
         @wraps(inner)

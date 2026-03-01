@@ -10,34 +10,36 @@ from timed_cache import TimedCache
 
 
 def test_set_arg_is_hashable_and_order_independent(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get({1, 2, 3})
     cache.get({3, 2, 1})
     assert mock.call_count == 1
 
 
 def test_mixed_type_set_arg_is_hashable_and_order_independent(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     cache.get({1, "a"})
     cache.get({"a", 1})
     assert mock.call_count == 1
 
 
 def test_mutating_list_argument_changes_cache_key(
-    counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
+    counter_cache_factory: Callable[..., tuple[MagicMock, TimedCache[int]]],
 ) -> None:
-    mock, cache = counter_cache_factory()
+    mock, cache = counter_cache_factory(key_fn=TimedCache.deep_key_fn)
     payload = [1, 2]
     first = cache.get(payload)
+    assert mock.call_count == 1
 
     payload.append(3)
     second = cache.get(payload)
-
+    assert mock.call_count == 2
     assert first != second
+
     assert mock.call_count == 2
 
 
@@ -140,10 +142,12 @@ def test_background_refresh_submit_failure_resets_refreshing_flag() -> None:
     cache.get("k")
     time.sleep(1.1)
 
-    with patch.object(cache._refresh_executor, "submit", side_effect=RuntimeError("boom")):
+    with patch.object(
+        cache._refresh_executor, "submit", side_effect=RuntimeError("boom")
+    ):
         with pytest.raises(RuntimeError, match="boom"):
             cache.get("k")
 
-    key = cache._make_key(("k",), {})
+    key = cache._key_fn("k")
     with cache._lock:
         assert cache._entries[key].is_refreshing is False

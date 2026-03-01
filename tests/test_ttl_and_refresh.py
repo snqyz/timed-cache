@@ -120,7 +120,7 @@ def test_is_refreshing_cleared_after_background_refresh(
         cache.get("k")
 
     time.sleep(0.1)
-    key = cache._make_key(("k",), {})
+    key = cache._key_fn("k")
     with cache._lock:
         entry = cache._entries[key]
     assert not entry.is_refreshing
@@ -131,7 +131,7 @@ def test_fetched_at_updated_after_refresh(
 ) -> None:
     _, cache = counter_cache_factory()
     cache.get("k")
-    key = cache._make_key(("k",), {})
+    key = cache._key_fn("k")
 
     with cache._lock:
         first_fetched_at = cache._entries[key].fetched_at
