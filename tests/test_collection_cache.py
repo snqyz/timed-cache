@@ -490,3 +490,71 @@ def test_batch_refresh_missing_key_for_not_ready_entry_removes_it():
     assert cache.peek("a") is None
     with cache._lock:
         assert ckey not in cache._entries
+
+
+def test_peek_collection():
+    mock = MagicMock(side_effect=lambda keys: {k: len(k) for k in keys})
+    cache = TimedCollection(fetch_fn=mock)
+
+    # Initial state: empty
+    assert cache.peek_collection(["a", "b"]) == {}
+
+    # Fetch "a"
+    cache.get_collection(["a"])
+    assert cache.peek_collection(["a", "b"]) == {"a": 1}
+
+    # Fetch "b"
+    cache.get_collection(["b"])
+    assert cache.peek_collection(["a", "b"]) == {"a": 1, "b": 1}
+
+    # Verify peek doesn't trigger fetch
+    mock.reset_mock()
+    assert cache.peek_collection(["c"]) == {}
+    mock.assert_not_called()
+
+
+def test_invalidate_collection():
+    cache = TimedCollection(fetch_fn=lambda keys: {k: len(k) for k in keys})
+
+    cache.get_collection(["a", "b", "c"])
+    assert cache.peek_collection(["a", "b", "c"]) == {"a": 1, "b": 1, "c": 1}
+
+    cache.invalidate_collection(["a", "c"])
+    assert cache.peek_collection(["a", "b", "c"]) == {"b": 1}
+
+    # Invalidating non-existent key should not raise
+    cache.invalidate_collection(["non-existent"])
+
+
+def test_peek_collection_with_kwargs():
+    def fetch_with_tag(keys, tag="none"):
+        return {k: f"{k}-{tag}" for k in keys}
+
+    cache = TimedCollection(fetch_fn=fetch_with_tag)
+
+    cache.get_collection(["a"], tag="foo")
+
+    # Peek with same tag should find it
+    assert cache.peek_collection(["a"], tag="foo") == {"a": "a-foo"}
+
+    # Peek with different tag should NOT find it (different cache key)
+    assert cache.peek_collection(["a"], tag="bar") == {}
+
+
+def test_invalidate_collection_with_kwargs():
+    def fetch_with_tag(keys, tag="none"):
+        return {k: f"{k}-{tag}" for k in keys}
+
+    cache = TimedCollection(fetch_fn=fetch_with_tag)
+
+    cache.get_collection(["a"], tag="foo")
+    cache.get_collection(["a"], tag="bar")
+
+    assert cache.peek_collection(["a"], tag="foo") == {"a": "a-foo"}
+    assert cache.peek_collection(["a"], tag="bar") == {"a": "a-bar"}
+
+    # Invalidate one tag
+    cache.invalidate_collection(["a"], tag="foo")
+
+    assert cache.peek_collection(["a"], tag="foo") == {}
+    assert cache.peek_collection(["a"], tag="bar") == {"a": "a-bar"}

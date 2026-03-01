@@ -465,6 +465,27 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
 
         return {k: results[k] for k in keys_list if k in results}
 
+    def peek_collection(self, keys: Iterable[K], **kwargs: Any) -> dict[K, V]:
+        """Return cached values for the given keys if present, without triggering a fetch.
+
+        Keys that are absent or still in an in-flight cold fetch state are omitted.
+        """
+        results: dict[K, V] = {}
+        with self._lock:
+            for k in keys:
+                ckey = self._make_key((k,), kwargs)
+                entry = self._entries.get(ckey)
+                if entry is not None and entry.ready.is_set():
+                    results[k] = cast(V, entry.value)
+        return results
+
+    def invalidate_collection(self, keys: Iterable[K], **kwargs: Any) -> None:
+        """Remove cache entries for the given keys and arguments, if present."""
+        with self._lock:
+            for k in keys:
+                ckey = self._make_key((k,), kwargs)
+                self._entries.pop(ckey, None)
+
     def _batch_refresh(self, keys: list[K], kwargs: dict[str, Any]) -> None:
         """Background worker to refresh a batch of keys."""
         try:
