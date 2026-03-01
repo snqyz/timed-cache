@@ -10,6 +10,7 @@ from timed_cache import TimedCache
 
 
 def fetch_scores(subject: str, *, passing_only: bool = False) -> list[int]:
+    # Simulate an expensive upstream call.
     print(f"[fetch] fetching scores for {subject!r} (passing_only={passing_only})...")
     time.sleep(1)
     scores = [random.randint(50, 100) for _ in range(5)]
@@ -17,10 +18,12 @@ def fetch_scores(subject: str, *, passing_only: bool = False) -> list[int]:
 
 
 def main() -> None:
+    # Two requests for the same key ("math") should trigger only one cold fetch.
     cache: TimedCache[list[int]] = TimedCache(fetch_fn=fetch_scores, ttl_seconds=10)
     results: dict[str, list[int] | None] = {}
 
     def request(thread_name: str) -> None:
+        # The second thread waits for the first cold fetch, then reuses result.
         value = cache.get("math")
         results[thread_name] = value
         print(f"[{thread_name}] got: {value}")
@@ -33,6 +36,7 @@ def main() -> None:
     t1.join()
     t2.join()
 
+    # Both threads should report the same cached payload.
     print("results:", results)
 
 

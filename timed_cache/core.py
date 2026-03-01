@@ -1,4 +1,13 @@
-"""Thread-safe timed cache with stale-while-revalidate semantics."""
+"""Thread-safe timed cache with stale-while-revalidate semantics.
+
+Concurrency model at a glance:
+- Exactly one thread owns an initial (cold) fetch for a given key.
+- Other threads targeting the same cold key wait on that key's ``ready`` event.
+- Once a value exists, stale reads return immediately and trigger background
+  refresh at most once per key at a time.
+- Locks protect only shared in-memory state; fetch functions always run outside
+  the lock to avoid global contention and lock convoying.
+"""
 
 import logging
 import threading
@@ -103,6 +112,8 @@ class TimedCache(Generic[T]):
         immediately if a background refresh is already running or has just
         been kicked off.
         """
+        # Build key once so every branch (lookup, fetch, refresh) refers to the
+        # exact same identity for this call.
         key = self._key_fn(*args, **kwargs)
 
         with self._lock:
@@ -113,6 +124,8 @@ class TimedCache(Generic[T]):
 
             if entry is None:
                 # Cold start — insert a placeholder and become the fetch owner.
+                # The placeholder immediately serializes concurrent callers for
+                # this key so we avoid duplicate upstream fetches.
                 entry = _CacheEntry(value=None, fetched_at=None)
                 self._entries[key] = entry
                 self._entries.move_to_end(key, last=True)
@@ -124,6 +137,8 @@ class TimedCache(Generic[T]):
                 self._entries.move_to_end(key, last=True)
                 if self._is_stale(entry) and not entry.is_refreshing:
                     # Stale — return the old value now, refresh in background.
+                    # Marking is_refreshing under the lock guarantees only one
+                    # thread schedules refresh work for this key.
                     entry.is_refreshing = True
                     self._spawn_background_refresh(
                         key,
@@ -133,6 +148,7 @@ class TimedCache(Generic[T]):
                     )
 
         if owner:
+            # Owner thread performs the initial fetch outside the lock.
             return self._do_cold_fetch(key, entry, args, kwargs)
 
         # For warm or stale-but-already-refreshing entries this is a no-op.
@@ -140,6 +156,7 @@ class TimedCache(Generic[T]):
         entry.ready.wait()
         with self._lock:
             if entry.error is not None:
+                # cold-start failures are propagated to all waiters
                 raise entry.error
             return entry.value
 
@@ -188,6 +205,8 @@ class TimedCache(Generic[T]):
                 self._raise_unhashable_key_error(error)
             if entry is None:
                 # Cold start in background
+                # Callers of refresh() explicitly asked for non-blocking behavior,
+                # so we create the placeholder and let the pool populate it.
                 entry = _CacheEntry(value=None, fetched_at=None)
                 self._entries[key] = entry
                 self._entries.move_to_end(key, last=True)
@@ -292,6 +311,7 @@ class TimedCache(Generic[T]):
         with self._lock:
             entry.error = None
             entry.value = value
+            # monotonic avoids issues with wall-clock adjustments
             entry.fetched_at = time.monotonic()
         entry.ready.set()
         return value
@@ -315,6 +335,8 @@ class TimedCache(Generic[T]):
             )
         except Exception:
             # Never leave the entry stuck in refreshing state.
+            # If submit fails (e.g., executor shutdown), callers must be able
+            # to trigger refresh again later.
             entry.is_refreshing = False
             raise
 
@@ -346,6 +368,8 @@ class TimedCache(Generic[T]):
                 if not entry.ready.is_set():
                     entry.error = error
                     if self._entries.get(key) is entry:
+                        # Identity check avoids deleting a newer replacement
+                        # entry that may have been inserted concurrently.
                         self._entries.pop(key, None)
         finally:
             entry.ready.set()
@@ -419,6 +443,8 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
           in a single batch.
         - Fresh keys are returned immediately.
         """
+        # Materialize once so we preserve input order in the final response and
+        # can iterate multiple times without exhausting generators.
         keys_list = list(keys)
 
         cold_keys: list[K] = []
@@ -454,6 +480,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                     # Another fetch is in progress for this key.
                     waiting_entries.setdefault(k, entry)
                 elif self._is_stale(entry):
+                    # stale-while-revalidate: return stale now, refresh later
                     results[k] = entry.value
                     if not entry.is_refreshing:
                         stale_keys.append(k)
@@ -477,6 +504,8 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                         except TypeError as key_error:
                             self._raise_unhashable_key_error(key_error)
                         if entry is not None and not entry.ready.is_set():
+                            # The currently indexed placeholder still belongs
+                            # to an in-flight cold fetch path.
                             entry.error = error
                             self._entries.pop(ckey, None)
                             entry.ready.set()
@@ -505,6 +534,8 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                     if k in new_data:
                         v = new_data[k]
                         if entry is None:
+                            # Placeholder was evicted while fetch ran; recreate
+                            # a ready entry so future reads can proceed.
                             entry = _CacheEntry(value=v, fetched_at=time.monotonic())
                             entry.ready.set()
                             self._entries[ckey] = entry
@@ -538,6 +569,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                 raise missing_error
 
         for k, entry in waiting_entries.items():
+            # Wait outside lock to avoid blocking unrelated keys.
             entry.ready.wait()
             with self._lock:
                 if entry.error is not None:
@@ -611,6 +643,9 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                         entry.ready.set()
                         continue
 
+                    # Missing key during background refresh:
+                    # - for warm entries keep stale value and just clear flag
+                    # - for placeholders fail fast and remove unusable entry
                     entry.is_refreshing = False
                     if not entry.ready.is_set():
                         missing_error = KeyError(
@@ -676,6 +711,7 @@ def timed_cache(
     """
 
     def decorate(inner: Callable[P, R]) -> Callable[P, R]:
+        # One cache instance per decorated function object.
         cache = TimedCache(
             fetch_fn=inner,
             ttl_seconds=ttl_seconds,
@@ -688,6 +724,8 @@ def timed_cache(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             return cache.get(*args, **kwargs)
 
+        # Expose cache operations on the wrapper for ergonomic control in
+        # application code and tests.
         wrapper.cache = cache
         wrapper.peek = cache.peek
         wrapper.refresh = cache.refresh
