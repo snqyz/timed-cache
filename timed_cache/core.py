@@ -423,6 +423,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
 
         cold_keys: list[K] = []
         cold_keys_set: set[K] = set()
+        # Tracks the exact placeholder object created by this call for each cold key.
+        # If LRU eviction replaces/removes the dict entry mid-fetch, we still need to
+        # complete that original object to unblock threads already waiting on it.
+        owned_cold_entries: dict[K, _CacheEntry[V]] = {}
         stale_keys: list[K] = []
         results: dict[K, V] = {}
         waiting_entries: dict[K, _CacheEntry[V]] = {}
@@ -441,6 +445,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                     self._entries[ckey] = entry
                     self._entries.move_to_end(ckey, last=True)
                     self._evict_one_if_needed_locked()
+                    owned_cold_entries[k] = entry
                     if k not in cold_keys_set:
                         cold_keys.append(k)
                         cold_keys_set.add(k)
@@ -465,6 +470,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             except Exception as error:
                 with self._lock:
                     for k in cold_keys:
+                        owned_entry = owned_cold_entries[k]
                         ckey = self._key_fn(k, **kwargs)
                         try:
                             entry = self._entries.get(ckey)
@@ -474,6 +480,11 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                             entry.error = error
                             self._entries.pop(ckey, None)
                             entry.ready.set()
+                        elif not owned_entry.ready.is_set():
+                            # The entry we created was already evicted/replaced; complete
+                            # the original placeholder object so existing waiters wake up.
+                            owned_entry.error = error
+                            owned_entry.ready.set()
                 raise
 
             missing_keys = [k for k in cold_keys if k not in new_data]
@@ -485,6 +496,7 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
 
             with self._lock:
                 for k in cold_keys:
+                    owned_entry = owned_cold_entries[k]
                     ckey = self._key_fn(k, **kwargs)
                     try:
                         entry = self._entries.get(ckey)
@@ -503,11 +515,24 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                             entry.error = None
                             entry.ready.set()
                             entry.is_refreshing = False
+                        if owned_entry is not entry and not owned_entry.ready.is_set():
+                            # If waiters hold a stale placeholder reference, mirror the
+                            # successful result onto it so their wait/read path still works.
+                            owned_entry.value = v
+                            owned_entry.fetched_at = time.monotonic()
+                            owned_entry.error = None
+                            owned_entry.is_refreshing = False
+                            owned_entry.ready.set()
                         results[k] = v
                     elif entry is not None and not entry.ready.is_set():
                         entry.error = cast("Exception", missing_error)
                         self._entries.pop(ckey, None)
                         entry.ready.set()
+                    elif not owned_entry.ready.is_set():
+                        # Missing-key failure with evicted/replaced placeholder: propagate
+                        # the same error to the original object to avoid indefinite waits.
+                        owned_entry.error = cast("Exception", missing_error)
+                        owned_entry.ready.set()
 
             if missing_error is not None:
                 raise missing_error

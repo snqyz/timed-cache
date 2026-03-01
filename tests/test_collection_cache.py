@@ -459,6 +459,121 @@ def test_get_collection_waiting_entry_raises_error():
     assert isinstance(thread_errors[0], ValueError)
 
 
+def test_get_collection_evicted_cold_placeholder_is_completed_for_waiters():
+    gate = threading.Event()
+    release = threading.Event()
+
+    def fetch(keys):
+        if keys == ["a"]:
+            gate.set()
+            release.wait(timeout=1.0)
+            return {"a": 1}
+        return {k: len(k) for k in keys}
+
+    cache = TimedCollection(fetch_fn=fetch, max_entries=1)
+    ckey_a = cache._key_fn("a")
+    holder: dict[str, int] = {}
+
+    def owner():
+        holder.update(cache.get_collection(["a"]))
+
+    t = threading.Thread(target=owner)
+    t.start()
+    assert gate.wait(timeout=1.0)
+
+    with cache._lock:
+        old_placeholder = cache._entries[ckey_a]
+        assert old_placeholder.ready.is_set() is False
+
+    # Evict the in-flight cold placeholder for "a".
+    cache.get_collection(["x"])
+    release.set()
+    t.join(timeout=1.0)
+
+    assert t.is_alive() is False
+    assert holder == {"a": 1}
+    # Any waiters that captured the old placeholder must be unblocked.
+    assert old_placeholder.ready.is_set() is True
+    assert old_placeholder.error is None
+    assert old_placeholder.value == 1
+
+
+def test_get_collection_cold_fetch_exception_loop_handles_already_ready_entry():
+    gate = threading.Event()
+    release = threading.Event()
+    thread_error: list[Exception] = []
+
+    def fetch(keys):
+        gate.set()
+        release.wait(timeout=1.0)
+        raise RuntimeError("boom")
+
+    cache = TimedCollection(fetch_fn=fetch)
+    ckey_a = cache._key_fn("a")
+
+    def run():
+        try:
+            cache.get_collection(["a", "b"])
+        except Exception as error:  # pragma: no cover - asserted below
+            thread_error.append(error)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert gate.wait(timeout=1.0)
+
+    # Force key "a" to look already completed before owner cleanup executes.
+    with cache._lock:
+        entry_a = cache._entries[ckey_a]
+        entry_a.value = 123
+        entry_a.fetched_at = time.monotonic()
+        entry_a.ready.set()
+
+    release.set()
+    t.join()
+
+    assert thread_error
+    assert isinstance(thread_error[0], RuntimeError)
+    assert "boom" in str(thread_error[0])
+
+
+def test_get_collection_missing_key_sets_error_on_evicted_owned_placeholder():
+    gate = threading.Event()
+    release = threading.Event()
+    thread_error: list[Exception] = []
+
+    def fetch(keys):
+        gate.set()
+        release.wait(timeout=1.0)
+        return {}
+
+    cache = TimedCollection(fetch_fn=fetch)
+    ckey_a = cache._key_fn("a")
+
+    def run():
+        try:
+            cache.get_collection(["a"])
+        except Exception as error:  # pragma: no cover - asserted below
+            thread_error.append(error)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert gate.wait(timeout=1.0)
+
+    # Remove cache entry while fetch is running; owner must still complete
+    # the owned placeholder with a missing-key error.
+    with cache._lock:
+        old_placeholder = cache._entries[ckey_a]
+    cache.invalidate("a")
+
+    release.set()
+    t.join()
+
+    assert thread_error
+    assert isinstance(thread_error[0], KeyError)
+    assert old_placeholder.ready.is_set() is True
+    assert isinstance(old_placeholder.error, KeyError)
+
+
 def test_get_collection_submit_failure_with_missing_entry_branch():
     cache = TimedCollection(
         fetch_fn=lambda keys: dict.fromkeys(keys, 1),
