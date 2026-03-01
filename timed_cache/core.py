@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import wraps
@@ -13,6 +13,8 @@ from typing import Any, Generic, ParamSpec, TypeVar, cast, overload
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+K = TypeVar("K")
+V = TypeVar("V")
 P = ParamSpec("P")
 R = TypeVar("R")
 
@@ -311,6 +313,208 @@ class TimedCache(Generic[T]):
             return
 
         self._entries.popitem(last=False)
+
+
+class TimedCollection(TimedCache[V], Generic[K, V], Mapping[K, V]):
+    """A TimedCache variant that behaves like a dictionary for a set of keys.
+
+    Each key is fetched and cached independently, allowing individual TTLs.
+    The fetch function must accept an iterable of keys and optional kwargs:
+    ``fetch_fn(keys, **kwargs)``.
+    """
+
+    def __init__(
+        self,
+        fetch_fn: Callable[..., dict[K, V]],
+        ttl_seconds: float = 300,
+        max_entries: int | None = None,
+        max_refresh_workers: int = 8,
+    ) -> None:
+        self._batch_fetch_fn = fetch_fn
+        # Adapter for TimedCache's single-key get/refresh operations.
+        super().__init__(
+            fetch_fn=self._fetch_single,
+            ttl_seconds=ttl_seconds,
+            max_entries=max_entries,
+            max_refresh_workers=max_refresh_workers,
+        )
+        self._current_keys: tuple[K, ...] = ()
+
+    def _fetch_single(self, key: K, **kwargs: Any) -> V:
+        """Adapter to call the batch fetch function for a single key."""
+        results = self._batch_fetch_fn([key], **kwargs)
+        if key not in results:
+            raise KeyError(f"Key {key!r} missing from fetch_fn results")
+        return results[key]
+
+    def get_collection(self, keys: Iterable[K], **kwargs: Any) -> dict[K, V]:
+        """Update active keys and return a dictionary of their current values.
+
+        Efficiency:
+        - Cold keys (not in cache) are fetched synchronously in a single batch.
+        - Stale keys are returned immediately and refreshed in the background
+          in a single batch.
+        - Fresh keys are returned immediately.
+        """
+        keys_list = list(keys)
+        self._current_keys = tuple(keys_list)
+
+        cold_keys: list[K] = []
+        cold_keys_set: set[K] = set()
+        stale_keys: list[K] = []
+        results: dict[K, V] = {}
+        waiting_entries: dict[K, _CacheEntry[V]] = {}
+
+        with self._lock:
+            for k in keys_list:
+                ckey = self._make_key((k,), kwargs)
+                entry = self._entries.get(ckey)
+                if entry is None:
+                    # Claim ownership for this cold key so concurrent callers
+                    # wait on this placeholder instead of re-fetching.
+                    entry = _CacheEntry(value=None, fetched_at=None)
+                    self._entries[ckey] = entry
+                    self._entries.move_to_end(ckey, last=True)
+                    self._evict_one_if_needed_locked()
+                    if k not in cold_keys_set:
+                        cold_keys.append(k)
+                        cold_keys_set.add(k)
+                elif not entry.ready.is_set():
+                    self._entries.move_to_end(ckey, last=True)
+                    # Another fetch is in progress for this key.
+                    waiting_entries.setdefault(k, entry)
+                elif self._is_stale(entry):
+                    results[k] = entry.value
+                    if not entry.is_refreshing:
+                        stale_keys.append(k)
+                        entry.is_refreshing = True
+                    self._entries.move_to_end(ckey, last=True)
+                else:
+                    results[k] = entry.value
+                    self._entries.move_to_end(ckey, last=True)
+
+        if cold_keys:
+            # Synchronous batch fetch for cold keys we own.
+            try:
+                new_data = self._batch_fetch_fn(cold_keys, **kwargs)
+            except Exception as error:
+                with self._lock:
+                    for k in cold_keys:
+                        ckey = self._make_key((k,), kwargs)
+                        entry = self._entries.get(ckey)
+                        if entry is not None and not entry.ready.is_set():
+                            entry.error = error
+                            self._entries.pop(ckey, None)
+                            entry.ready.set()
+                raise
+
+            missing_keys = [k for k in cold_keys if k not in new_data]
+            missing_error = None
+            if missing_keys:
+                missing_error = KeyError(
+                    f"Keys missing from fetch_fn results: {missing_keys!r}",
+                )
+
+            with self._lock:
+                for k in cold_keys:
+                    ckey = self._make_key((k,), kwargs)
+                    entry = self._entries.get(ckey)
+                    if k in new_data:
+                        v = new_data[k]
+                        if entry is None:
+                            entry = _CacheEntry(value=v, fetched_at=time.monotonic())
+                            entry.ready.set()
+                            self._entries[ckey] = entry
+                            self._evict_one_if_needed_locked()
+                        else:
+                            entry.value = v
+                            entry.fetched_at = time.monotonic()
+                            entry.error = None
+                            entry.ready.set()
+                            entry.is_refreshing = False
+                        results[k] = v
+                    elif entry is not None and not entry.ready.is_set():
+                        entry.error = cast("Exception", missing_error)
+                        self._entries.pop(ckey, None)
+                        entry.ready.set()
+
+            if missing_error is not None:
+                raise missing_error
+
+        for k, entry in waiting_entries.items():
+            entry.ready.wait()
+            with self._lock:
+                if entry.error is not None:
+                    raise entry.error
+                results[k] = entry.value
+
+        if stale_keys:
+            # Background batch refresh for stale keys
+            try:
+                self._refresh_executor.submit(self._batch_refresh, stale_keys, kwargs)
+            except Exception:
+                with self._lock:
+                    for k in stale_keys:
+                        ckey = self._make_key((k,), kwargs)
+                        entry = self._entries.get(ckey)
+                        if entry is not None:
+                            entry.is_refreshing = False
+                raise
+
+        return {k: results[k] for k in keys_list if k in results}
+
+    def _batch_refresh(self, keys: list[K], kwargs: dict[str, Any]) -> None:
+        """Background worker to refresh a batch of keys."""
+        try:
+            new_data = self._batch_fetch_fn(keys, **kwargs)
+            with self._lock:
+                for k in keys:
+                    ckey = self._make_key((k,), kwargs)
+                    entry = self._entries.get(ckey)
+                    if entry is None:
+                        continue
+                    if k in new_data:
+                        v = new_data[k]
+                        entry.value = v
+                        entry.fetched_at = time.monotonic()
+                        entry.error = None
+                        entry.is_refreshing = False
+                        entry.ready.set()
+                        continue
+
+                    entry.is_refreshing = False
+                    if not entry.ready.is_set():
+                        missing_error = KeyError(
+                            f"Key {k!r} missing from fetch_fn results",
+                        )
+                        entry.error = missing_error
+                        self._entries.pop(ckey, None)
+                    entry.ready.set()
+        except Exception as error:
+            logger.exception("Background batch refresh failed")
+            with self._lock:
+                for k in keys:
+                    ckey = self._make_key((k,), kwargs)
+                    entry = self._entries.get(ckey)
+                    if entry:
+                        entry.is_refreshing = False
+                        if not entry.ready.is_set():
+                            entry.error = error
+                            self._entries.pop(ckey, None)
+                        entry.ready.set()
+
+    # Mapping interface for "dictionary-like" behavior
+    def __getitem__(self, key: K) -> V:
+        return self.get(key)
+
+    def __iter__(self) -> Iterator[K]:
+        return iter(self._current_keys)
+
+    def __len__(self) -> int:
+        return len(self._current_keys)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._current_keys
 
 
 @overload
