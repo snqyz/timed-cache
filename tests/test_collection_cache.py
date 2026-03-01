@@ -17,14 +17,6 @@ def test_collection_batch_fetches_on_cold_start():
     mock.assert_called_once_with(["apple", "banana"])
 
 
-def test_collection_supports_getitem():
-    cache = TimedCollection(fetch_fn=lambda keys: {k: len(k) for k in keys})
-    cache.get_collection(["a", "bc"])
-
-    assert cache["a"] == 1
-    assert cache["bc"] == 2
-
-
 def test_collection_individual_ttl():
     mock = MagicMock(side_effect=lambda keys: {k: time.monotonic() for k in keys})
     # Set TTL to 0.5s
@@ -54,14 +46,14 @@ def test_collection_individual_ttl():
     assert mock.call_count == 3
 
     # Verify 'a' was refreshed
-    assert cache["a"] > t1
+    assert cache.get("a") > t1
 
 
 def test_collection_single_key_access_uses_batch_fn():
     mock = MagicMock(side_effect=lambda keys: {k: len(k) for k in keys})
     cache = TimedCollection(fetch_fn=mock)
 
-    assert cache["word"] == 4
+    assert cache.get("word") == 4
     mock.assert_called_once_with(["word"])
 
 
@@ -86,7 +78,7 @@ def test_collection_batch_refresh():
 def test_fetch_single_missing_key():
     cache = TimedCollection(fetch_fn=lambda keys: {})
     with pytest.raises(KeyError, match="missing from fetch_fn results"):
-        _ = cache["missing"]
+        _ = cache.get("missing")
 
 
 def test_get_collection_already_refreshing():
@@ -139,7 +131,7 @@ def test_get_collection_entry_exists_after_fetch():
     t.join()
     # The slow_fetch should have finished and hit the 'else' block
     # and updated the entry to value=1
-    assert cache["a"] == 1
+    assert cache.get("a") == 1
 
 
 def test_batch_refresh_failure(caplog):
@@ -163,7 +155,7 @@ def test_batch_refresh_failure(caplog):
 
     assert "Background batch refresh failed" in caplog.text
     # Stale value should still be there
-    assert cache["a"] == 1
+    assert cache.get("a") == 1
 
 
 def test_batch_refresh_entry_not_found():
@@ -234,7 +226,7 @@ def test_batch_refresh_failure_entry_missing(caplog):
 
     assert "Background batch refresh failed" in caplog.text
     # 'a' should still be there (stale)
-    assert cache["a"] == 1
+    assert cache.get("a") == 1
 
 
 from timed_cache.core import _CacheEntry
@@ -282,7 +274,8 @@ def test_get_collection_missing_cold_key_raises_and_allows_retry():
 
 def test_get_collection_rolls_back_refresh_flag_when_submit_fails():
     cache = TimedCollection(
-        fetch_fn=lambda keys: dict.fromkeys(keys, 1), ttl_seconds=0.1
+        fetch_fn=lambda keys: dict.fromkeys(keys, 1),
+        ttl_seconds=0.1,
     )
     cache.get_collection(["a"])
     time.sleep(0.2)
@@ -347,7 +340,7 @@ def test_get_collection_duplicate_key_after_eviction_skips_duplicate_fetch():
 
 def test_get_collection_cold_fetch_exception_cleans_placeholders():
     cache = TimedCollection(
-        fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom"))
+        fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -468,7 +461,8 @@ def test_get_collection_waiting_entry_raises_error():
 
 def test_get_collection_submit_failure_with_missing_entry_branch():
     cache = TimedCollection(
-        fetch_fn=lambda keys: dict.fromkeys(keys, 1), ttl_seconds=0.1
+        fetch_fn=lambda keys: dict.fromkeys(keys, 1),
+        ttl_seconds=0.1,
     )
     cache.get_collection(["a"])
     time.sleep(0.2)
@@ -564,3 +558,117 @@ def test_invalidate_collection_with_kwargs():
 
     assert cache.peek_collection(["a"], tag="foo") == {}
     assert cache.peek_collection(["a"], tag="bar") == {"a": "a-bar"}
+
+
+def test_get_collection_raises_helpful_error_for_unhashable_cache_key():
+    cache = TimedCollection(
+        fetch_fn=lambda keys: {k: len(k) for k in keys},
+        key_fn=lambda key, **kwargs: [key],
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.get_collection(["a"])
+
+
+def test_get_collection_cold_fetch_failure_cleanup_unhashable_key():
+    calls = 0
+
+    def key_fn(key, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (key,)
+        return [key]
+
+    cache = TimedCollection(
+        fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom")),
+        key_fn=key_fn,
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.get_collection(["a"])
+
+
+def test_get_collection_cold_fetch_update_unhashable_key():
+    calls = 0
+
+    def key_fn(key, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (key,)
+        return [key]
+
+    cache = TimedCollection(
+        fetch_fn=lambda keys: {k: len(k) for k in keys},
+        key_fn=key_fn,
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.get_collection(["a"])
+
+
+def test_get_collection_submit_failure_cleanup_unhashable_key():
+    calls = 0
+
+    def key_fn(key, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 4:
+            return (key,)
+        return [key]
+
+    cache = TimedCollection(
+        fetch_fn=lambda keys: dict.fromkeys(keys, 1),
+        ttl_seconds=0.1,
+        key_fn=key_fn,
+    )
+    cache.get_collection(["a"])
+    time.sleep(0.2)
+
+    def fail_submit(*args, **kwargs):
+        raise RuntimeError("submit failed")
+
+    cache._refresh_executor.submit = fail_submit  # type: ignore[method-assign]
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.get_collection(["a"])
+
+
+def test_peek_collection_raises_helpful_error_for_unhashable_cache_key():
+    cache = TimedCollection(
+        fetch_fn=lambda keys: {k: len(k) for k in keys},
+        key_fn=lambda key, **kwargs: [key],
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.peek_collection(["a"])
+
+
+def test_invalidate_collection_raises_helpful_error_for_unhashable_cache_key():
+    cache = TimedCollection(
+        fetch_fn=lambda keys: {k: len(k) for k in keys},
+        key_fn=lambda key, **kwargs: [key],
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.invalidate_collection(["a"])
+
+
+def test_batch_refresh_raises_helpful_error_for_unhashable_cache_key_in_try_path():
+    cache = TimedCollection(
+        fetch_fn=lambda keys: {k: len(k) for k in keys},
+        key_fn=lambda key, **kwargs: [key],
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache._batch_refresh(["a"], {})
+
+
+def test_batch_refresh_raises_helpful_error_for_unhashable_cache_key_in_except_path():
+    cache = TimedCollection(
+        fetch_fn=lambda keys: (_ for _ in ()).throw(RuntimeError("boom")),
+        key_fn=lambda key, **kwargs: [key],
+    )
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache._batch_refresh(["a"], {})

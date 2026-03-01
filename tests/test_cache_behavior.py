@@ -326,8 +326,19 @@ def test_make_key_fails_on_mutable():
     cache = TimedCache(fetch_fn=lambda x: x, key_fn=TimedCache.make_key)
 
     # make_key does not convert lists to tuples
-    with pytest.raises(TypeError, match="unhashable type: 'list'"):
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
         cache.get([1, 2, 3])
+
+
+def test_make_key_fails_on_mutable_for_non_get_methods():
+    cache = TimedCache(fetch_fn=lambda x: x, key_fn=TimedCache.make_key)
+
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.peek([1, 2, 3])
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.invalidate([1, 2, 3])
+    with pytest.raises(TypeError, match="The default 'make_key' requires hashable arguments"):
+        cache.refresh([1, 2, 3])
 
 
 def test_decorator_make_key():

@@ -106,7 +106,10 @@ class TimedCache(Generic[T]):
         key = self._key_fn(*args, **kwargs)
 
         with self._lock:
-            entry = self._entries.get(key)
+            try:
+                entry = self._entries.get(key)
+            except TypeError as error:
+                self._raise_unhashable_key_error(error)
 
             if entry is None:
                 # Cold start — insert a placeholder and become the fetch owner.
@@ -148,7 +151,10 @@ class TimedCache(Generic[T]):
         """
         key = self._key_fn(*args, **kwargs)
         with self._lock:
-            entry = self._entries.get(key)
+            try:
+                entry = self._entries.get(key)
+            except TypeError as error:
+                self._raise_unhashable_key_error(error)
             if entry is None or not entry.ready.is_set():
                 return None
             return entry.value
@@ -157,7 +163,10 @@ class TimedCache(Generic[T]):
         """Remove the cache entry for the given arguments, if present."""
         key = self._key_fn(*args, **kwargs)
         with self._lock:
-            self._entries.pop(key, None)
+            try:
+                self._entries.pop(key, None)
+            except TypeError as error:
+                self._raise_unhashable_key_error(error)
 
     def invalidate_all(self) -> None:
         """Remove all cached entries."""
@@ -173,7 +182,10 @@ class TimedCache(Generic[T]):
         """
         key = self._key_fn(*args, **kwargs)
         with self._lock:
-            entry = self._entries.get(key)
+            try:
+                entry = self._entries.get(key)
+            except TypeError as error:
+                self._raise_unhashable_key_error(error)
             if entry is None:
                 # Cold start in background
                 entry = _CacheEntry(value=None, fetched_at=None)
@@ -195,6 +207,15 @@ class TimedCache(Generic[T]):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _raise_unhashable_key_error(error: TypeError) -> None:
+        """Raise a helpful error for unhashable cache keys."""
+        raise TypeError(
+            f"Cache key is unhashable: {error}. "
+            "The default 'make_key' requires hashable arguments (int, str, tuple). "
+            "To support mutable arguments (list, dict, set), use 'key_fn=TimedCache.deep_key_fn'.",
+        ) from None
 
     @staticmethod
     def make_key(*args: Any, **kwargs: Any) -> Any:
@@ -409,7 +430,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
         with self._lock:
             for k in keys_list:
                 ckey = self._key_fn(k, **kwargs)
-                entry = self._entries.get(ckey)
+                try:
+                    entry = self._entries.get(ckey)
+                except TypeError as error:
+                    self._raise_unhashable_key_error(error)
                 if entry is None:
                     # Claim ownership for this cold key so concurrent callers
                     # wait on this placeholder instead of re-fetching.
@@ -442,7 +466,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                 with self._lock:
                     for k in cold_keys:
                         ckey = self._key_fn(k, **kwargs)
-                        entry = self._entries.get(ckey)
+                        try:
+                            entry = self._entries.get(ckey)
+                        except TypeError as key_error:
+                            self._raise_unhashable_key_error(key_error)
                         if entry is not None and not entry.ready.is_set():
                             entry.error = error
                             self._entries.pop(ckey, None)
@@ -459,7 +486,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             with self._lock:
                 for k in cold_keys:
                     ckey = self._key_fn(k, **kwargs)
-                    entry = self._entries.get(ckey)
+                    try:
+                        entry = self._entries.get(ckey)
+                    except TypeError as key_error:
+                        self._raise_unhashable_key_error(key_error)
                     if k in new_data:
                         v = new_data[k]
                         if entry is None:
@@ -497,7 +527,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
                 with self._lock:
                     for k in stale_keys:
                         ckey = self._key_fn(k, **kwargs)
-                        entry = self._entries.get(ckey)
+                        try:
+                            entry = self._entries.get(ckey)
+                        except TypeError as key_error:
+                            self._raise_unhashable_key_error(key_error)
                         if entry is not None:
                             entry.is_refreshing = False
                 raise
@@ -513,7 +546,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
         with self._lock:
             for k in keys:
                 ckey = self._key_fn(k, **kwargs)
-                entry = self._entries.get(ckey)
+                try:
+                    entry = self._entries.get(ckey)
+                except TypeError as error:
+                    self._raise_unhashable_key_error(error)
                 if entry is not None and entry.ready.is_set():
                     results[k] = cast("V", entry.value)
         return results
@@ -523,7 +559,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
         with self._lock:
             for k in keys:
                 ckey = self._key_fn(k, **kwargs)
-                self._entries.pop(ckey, None)
+                try:
+                    self._entries.pop(ckey, None)
+                except TypeError as error:
+                    self._raise_unhashable_key_error(error)
 
     def _batch_refresh(self, keys: list[K], kwargs: dict[str, Any]) -> None:
         """Background worker to refresh a batch of keys."""
@@ -532,7 +571,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             with self._lock:
                 for k in keys:
                     ckey = self._key_fn(k, **kwargs)
-                    entry = self._entries.get(ckey)
+                    try:
+                        entry = self._entries.get(ckey)
+                    except TypeError as key_error:
+                        self._raise_unhashable_key_error(key_error)
                     if entry is None:
                         continue
                     if k in new_data:
@@ -557,17 +599,16 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
             with self._lock:
                 for k in keys:
                     ckey = self._key_fn(k, **kwargs)
-                    entry = self._entries.get(ckey)
+                    try:
+                        entry = self._entries.get(ckey)
+                    except TypeError as key_error:
+                        self._raise_unhashable_key_error(key_error)
                     if entry:
                         entry.is_refreshing = False
                         if not entry.ready.is_set():
                             entry.error = error
                             self._entries.pop(ckey, None)
                         entry.ready.set()
-
-    # Dictionary-like access
-    def __getitem__(self, key: K) -> V:
-        return self.get(key)
 
 
 @overload
