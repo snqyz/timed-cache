@@ -2,7 +2,7 @@ import time
 import threading
 from unittest.mock import MagicMock
 
-from timed_cache import TimedCache, timed_cache
+from timed_cache import NOT_CACHED, TimedCache, timed_cache
 
 def test_refresh_forces_update_on_fresh_entry() -> None:
     mock = MagicMock(side_effect=lambda *a, **k: mock.call_count)
@@ -157,5 +157,5 @@ def test_failed_cold_background_refresh_handles_replaced_or_missing_entry() -> N
     release.set()
     time.sleep(0.1)
 
-    assert cache.peek("k") is None
+    assert cache.peek("k") is NOT_CACHED
     assert cache.size == 0

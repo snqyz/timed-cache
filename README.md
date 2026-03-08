@@ -48,7 +48,9 @@ cache = TimedCache(
 Decorator helpers:
 
 ```python
-fetch_user.peek(42)   # returns cached value or None; never fetches
+from timed_cache import NOT_CACHED
+
+fetch_user.peek(42) is NOT_CACHED   # cache miss; never fetches
 fetch_user.invalidate(42)
 fetch_user.invalidate_all()
 size = fetch_user.cache.size

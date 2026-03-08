@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from timed_cache import timed_cache
+from timed_cache import NOT_CACHED, timed_cache
 
 
 def test_timed_cache_decorator_without_parentheses_caches_values() -> None:
@@ -53,7 +53,7 @@ def test_decorated_function_exposes_peek_helper() -> None:
     def fetch(value: int) -> int:
         return mock(value)
 
-    assert fetch.peek(1) is None
+    assert fetch.peek(1) is NOT_CACHED
     assert fetch(1) == 10
     assert fetch.peek(1) == 10
     assert mock.call_count == 1

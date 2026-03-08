@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from timed_cache import TimedCollection
+from timed_cache import NOT_CACHED, TimedCollection
 
 
 def test_collection_batch_fetches_on_cold_start():
@@ -178,7 +178,7 @@ def test_batch_refresh_entry_not_found():
     # Wait for background refresh to finish
     time.sleep(0.3)
     # If it didn't crash, good.
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
 
 
 def test_batch_refresh_failure_cold_entry(caplog):
@@ -202,7 +202,7 @@ def test_batch_refresh_failure_cold_entry(caplog):
 
     assert "Background batch refresh failed" in caplog.text
     # Entry should have been removed
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
     assert ckey not in cache._entries
 
 
@@ -267,7 +267,7 @@ def test_get_collection_missing_cold_key_raises_and_allows_retry():
     with pytest.raises(KeyError, match="Keys missing from fetch_fn results"):
         cache.get_collection(["a"])
 
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
     assert cache.get_collection(["a"]) == {"a": 1}
     assert mock.call_count == 2
 
@@ -346,8 +346,8 @@ def test_get_collection_cold_fetch_exception_cleans_placeholders():
     with pytest.raises(RuntimeError, match="boom"):
         cache.get_collection(["a", "b"])
 
-    assert cache.peek("a") is None
-    assert cache.peek("b") is None
+    assert cache.peek("a") is NOT_CACHED
+    assert cache.peek("b") is NOT_CACHED
 
 
 def test_get_collection_cold_fetch_exception_handles_evicted_placeholder():
@@ -360,8 +360,8 @@ def test_get_collection_cold_fetch_exception_handles_evicted_placeholder():
     with pytest.raises(RuntimeError, match="boom"):
         cache.get_collection(["a", "b"])
 
-    assert cache.peek("a") is None
-    assert cache.peek("b") is None
+    assert cache.peek("a") is NOT_CACHED
+    assert cache.peek("b") is NOT_CACHED
 
 
 def test_get_collection_entry_none_path_after_cold_fetch():
@@ -590,7 +590,7 @@ def test_get_collection_submit_failure_with_missing_entry_branch():
     with pytest.raises(RuntimeError, match="submit failed"):
         cache.get_collection(["a"])
 
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
 
 
 def test_batch_refresh_missing_key_for_not_ready_entry_removes_it():
@@ -602,7 +602,7 @@ def test_batch_refresh_missing_key_for_not_ready_entry_removes_it():
 
     cache._batch_refresh(["a"], {})
 
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
     with cache._lock:
         assert ckey not in cache._entries
 

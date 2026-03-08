@@ -32,6 +32,18 @@ R = TypeVar("R")
 CacheKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
 
 
+class _NotCachedType:
+    """Sentinel returned by peek() when a key is not currently cached."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NOT_CACHED"
+
+
+NOT_CACHED = _NotCachedType()
+
+
 @dataclass
 class _CacheEntry(Generic[T]):
     """A single cached value.
@@ -167,11 +179,12 @@ class TimedCache(Generic[T]):
                 raise entry.error
             return entry.value
 
-    def peek(self, *args: Any, **kwargs: Any) -> T | None:
+    def peek(self, *args: Any, **kwargs: Any) -> T | None | _NotCachedType:
         """Return a cached value if present, without triggering a fetch.
 
-        Returns ``None`` when the key is absent or still in an in-flight cold
-        fetch placeholder state.
+        Returns ``NOT_CACHED`` when the key is absent or still in an in-flight
+        cold fetch placeholder state. Cached ``None`` values are returned as
+        ``None``.
         """
         key = self._key_fn(*args, **kwargs)
         with self._lock:
@@ -180,7 +193,7 @@ class TimedCache(Generic[T]):
             except TypeError as error:
                 self._raise_unhashable_key_error(error)
             if entry is None or not entry.ready.is_set():
-                return None
+                return NOT_CACHED
             return entry.value
 
     def invalidate(self, *args: Any, **kwargs: Any) -> None:

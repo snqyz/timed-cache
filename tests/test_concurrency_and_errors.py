@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from timed_cache import TimedCache
+from timed_cache import NOT_CACHED, TimedCache
 
 
 def test_concurrent_cold_requests_never_return_none(
@@ -340,7 +340,7 @@ def test_peek_during_inflight_cold_fetch_returns_none() -> None:
     thread.start()
     assert entered.wait(timeout=1.0)
 
-    assert cache.peek("k") is None
+    assert cache.peek("k") is NOT_CACHED
     release.set()
     thread.join(timeout=1.0)
     assert not thread.is_alive()

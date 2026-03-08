@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from timed_cache import TimedCache
+from timed_cache import NOT_CACHED, TimedCache
 
 
 def test_returns_fetched_value(
@@ -37,11 +37,11 @@ def test_returns_typed_value() -> None:
     assert cache.get("world") == "hello world"
 
 
-def test_peek_miss_returns_none_without_fetch(
+def test_peek_miss_returns_not_cached_without_fetch(
     counter_cache_factory: Callable[[float], tuple[MagicMock, TimedCache[int]]],
 ) -> None:
     mock, cache = counter_cache_factory()
-    assert cache.peek("a") is None
+    assert cache.peek("a") is NOT_CACHED
     assert mock.call_count == 0
 
 
@@ -61,6 +61,18 @@ def test_peek_stale_entry_returns_stale_value_without_refresh() -> None:
     assert cache.get("a") == 1
     assert cache.peek("a") == 1
     assert mock.call_count == 1
+
+
+def test_peek_cached_none_returns_none_instead_of_miss() -> None:
+    cache: TimedCache[None] = TimedCache(fetch_fn=lambda key: None)
+
+    assert cache.peek("a") is NOT_CACHED
+    assert cache.get("a") is None
+    assert cache.peek("a") is None
+
+
+def test_not_cached_repr_is_stable() -> None:
+    assert repr(NOT_CACHED) == "NOT_CACHED"
 
 
 def test_same_positional_args_hit(
