@@ -393,8 +393,10 @@ class TimedCollection(TimedCache[V], Generic[K, V]):
     ``fetch_fn(keys, **kwargs)``.
 
     Key Generation:
-    By default, this uses the fast ``make_key`` which expects keys to be
-    hashable. Pass ``key_fn=TimedCache.deep_key_fn`` if keys are mutable.
+    Collection keys themselves must be hashable because the batch fetch
+    function returns ``dict[K, V]`` and the cache tracks per-key state in
+    dictionaries internally. ``key_fn`` can still customize the cache identity
+    for each key, but it does not make mutable collection keys supported.
     """
 
     def __init__(
