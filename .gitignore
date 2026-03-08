@@ -13,3 +13,7 @@ wheels/
 .python-version
 settings.json
 .coverage
+
+GEMINI.md
+.gitignore
+perf.py

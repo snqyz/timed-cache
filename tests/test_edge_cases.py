@@ -1,5 +1,6 @@
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -151,3 +152,37 @@ def test_background_refresh_submit_failure_resets_refreshing_flag() -> None:
     key = cache._key_fn("k")
     with cache._lock:
         assert cache._entries[key].is_refreshing is False
+
+
+def test_close_shuts_down_refresh_executor_and_is_idempotent() -> None:
+    cache: TimedCache[int] = TimedCache(fetch_fn=lambda: 1)
+
+    with patch.object(cache._refresh_executor, "shutdown") as shutdown:
+        cache.close(wait=False, cancel_futures=True)
+        cache.close()
+
+    shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+
+def test_gc_finalizer_shuts_down_refresh_executor() -> None:
+    cache: TimedCache[int] = TimedCache(fetch_fn=lambda: 1)
+    executor = cache._refresh_executor
+    finalizer = cache._refresh_executor_finalizer
+    cache_ref = weakref.ref(cache)
+
+    with patch.object(executor, "shutdown") as shutdown:
+        del cache
+        finalizer()
+
+    assert cache_ref() is None
+    shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+
+def test_cache_context_manager_returns_self_and_closes_on_exit() -> None:
+    cache: TimedCache[int] = TimedCache(fetch_fn=lambda: 1)
+
+    with patch.object(cache, "close") as close:
+        with cache as active_cache:
+            assert active_cache is cache
+
+    close.assert_called_once_with()

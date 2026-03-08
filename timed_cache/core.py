@@ -12,6 +12,7 @@ Concurrency model at a glance:
 import logging
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -97,6 +98,12 @@ class TimedCache(Generic[T]):
             max_workers=max_refresh_workers,
             thread_name_prefix="timed-cache-refresh",
         )
+        self._refresh_executor_finalizer = weakref.finalize(
+            self,
+            type(self)._shutdown_executor,
+            self._refresh_executor,
+        )
+        self._is_shutdown = False
         # Single lock guards _entries and all entry.is_refreshing flags.
         # It is never held across a fetch_fn call, so contention stays low.
         self._lock = threading.Lock()
@@ -190,6 +197,33 @@ class TimedCache(Generic[T]):
         with self._lock:
             self._entries.clear()
 
+    def close(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+        """Shut down the background refresh executor.
+
+        After closing, any operation that needs to submit background work will
+        fail with the underlying executor error.
+        """
+        with self._lock:
+            if self._is_shutdown:
+                return
+            self._is_shutdown = True
+
+        self._refresh_executor.shutdown(
+            wait=wait,
+            cancel_futures=cancel_futures,
+        )
+        self._refresh_executor_finalizer.detach()
+
+    def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+        """Alias for ``close()`` to mirror ``ThreadPoolExecutor``."""
+        self.close(wait=wait, cancel_futures=cancel_futures)
+
+    def __enter__(self) -> "TimedCache[T]":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
     def refresh(self, *args: Any, **kwargs: Any) -> None:
         """Manually trigger a background refresh for the given arguments.
 
@@ -226,6 +260,11 @@ class TimedCache(Generic[T]):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _shutdown_executor(executor: ThreadPoolExecutor) -> None:
+        """Best-effort cleanup path for caches that are garbage-collected."""
+        executor.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _raise_unhashable_key_error(error: TypeError) -> None:
@@ -710,6 +749,8 @@ def timed_cache(
     - ``refresh(*args, **kwargs)``
     - ``invalidate(*args, **kwargs)``
     - ``invalidate_all()``
+    - ``close(wait=True, cancel_futures=False)``
+    - ``shutdown(wait=True, cancel_futures=False)``
     """
 
     def decorate(inner: Callable[P, R]) -> Callable[P, R]:
@@ -733,6 +774,8 @@ def timed_cache(
         wrapper.refresh = cache.refresh
         wrapper.invalidate = cache.invalidate
         wrapper.invalidate_all = cache.invalidate_all
+        wrapper.close = cache.close
+        wrapper.shutdown = cache.shutdown
         return cast("Callable[P, R]", wrapper)
 
     if func is not None:

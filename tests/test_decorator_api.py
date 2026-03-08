@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from timed_cache import timed_cache
 
@@ -78,3 +78,23 @@ def test_decorated_function_exposes_refresh_helper() -> None:
 
     assert fetch(1) == 20
     assert mock.call_count == 2
+
+
+def test_decorated_function_exposes_executor_lifecycle_helpers() -> None:
+    @timed_cache
+    def fetch(value: int) -> int:
+        return value
+
+    with patch.object(fetch.cache._refresh_executor, "shutdown") as shutdown:
+        fetch.close(wait=False, cancel_futures=True)
+
+    shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    @timed_cache
+    def fetch_again(value: int) -> int:
+        return value
+
+    with patch.object(fetch_again.cache._refresh_executor, "shutdown") as shutdown:
+        fetch_again.shutdown(wait=False, cancel_futures=True)
+
+    shutdown.assert_called_once_with(wait=False, cancel_futures=True)
